@@ -1,0 +1,4 @@
+[submodule "tbdb"]
+	path = tbdb
+	url = git@github.com:jodyphelan/tbdb.git
+	branch = master
