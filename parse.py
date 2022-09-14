@@ -235,7 +235,7 @@ def nucleotideVariants(gene: str, mutation: str) -> str:
     dup = re.compile(r"""
                     [nc]\. #Leading type
                     (-?[0-9]+) #Start pos
-                    (_-?[0-9]+)? #Maybe end pos
+                    _?(-?[0-9]+)? #Maybe end pos
                     dup #Dup
                     ([AGCT]+) #Bases duplicated
                     """, re.VERBOSE)
@@ -244,7 +244,7 @@ def nucleotideVariants(gene: str, mutation: str) -> str:
         if end:
             #We want the ins after the end of the sequence, so prioritise this if existing
             pos = end
-        return gene + "@" + pos + "_ins_" + bases
+        return gene + "@" + pos + "_ins_" + bases.lower()
 
     assert False, f"Nothing found for: {gene} @ {mutation}"        
 
@@ -274,5 +274,6 @@ if __name__ == "__main__":
 
         #Add the others
         for mutation, drug in other.keys():
-            f.write(common+drug+","+mutation+","+other[(mutation, drug)]+",{},{},{}\n")   
+            if (mutation, drug) not in resistant.keys():
+                f.write(common+drug+","+mutation+","+other[(mutation, drug)]+",{},{},{}\n")   
         
