@@ -272,12 +272,22 @@ def addExtras(reference: gumpy.Genome) -> None:
         #Check for default rules/multi for skipping
         if "*" in mut or "?" in mut or "&" in mut or "indel" in mut:
             continue
-        promoter = re.compile(r"""
+        promoterSNP = re.compile(r"""
                             ([a-zA-Z0-9_]+)@ #Leading gene name
-                            ([a-z])(-[0-9]+)([a-z])
+                            ([a-z])(-[0-9]+)([a-z]) #Nucleotide SNP
                             """, re.VERBOSE)
-        if promoter.fullmatch(mut):
-            gene, ref, pos, alt = promoter.fullmatch(mut).groups()
+        #With indels, we need the bases to properly pull out other mutations
+        #So we have to ignore cases where bases are ambiguous or just a number
+        promoterIns = re.compile(r"""
+                            ([a-zA-Z0-9_]+)@ #Leading gene name
+                            (-[0-9]+)_ins_([acgt]+)
+                            """, re.VERBOSE)
+        promoterDel = re.compile(r"""
+                            ([a-zA-Z0-9_]+)@ #Leading gene name
+                            (-[0-9]+)_del_([acgt]+)
+                            """, re.VERBOSE)
+        if promoterSNP.fullmatch(mut):
+            gene, ref, pos, alt = promoterSNP.fullmatch(mut).groups()
             pos = int(pos)
             sample = copy.deepcopy(reference)
             print(gene, pos, ref, alt)
@@ -297,30 +307,77 @@ def addExtras(reference: gumpy.Genome) -> None:
                 pos_ = geneStart+pos
                 assert reference.nucleotide_sequence[reference.nucleotide_index == geneStart+pos] == ref, "Ref does not match the genome..."
                 sample.nucleotide_sequence[reference.nucleotide_index == geneStart+pos] = alt
+
+        elif promoterIns.fullmatch(mut):
+            gene, pos, bases = promoterIns.fullmatch(mut).groups()
+            sample = copy.deepcopy(reference)
+            pos = int(pos)
+            print(gene, pos, "ins", bases)
+
+            if reference.genes[gene]['reverse_complement']:
+                #Revcomp genes' promoters will be past the `gene end`
+                geneEnd = reference.genes[gene]['end']
+                bases = ''.join(gumpy.Gene._complement(bases)[::-1])
+                pos_ = geneEnd-pos-1
+            else:
+                geneStart = reference.genes[gene]['start']
+                pos_ = geneStart+pos
+
+            sample.is_indel[pos_] = True
+            sample.indel_length[pos_] = len(bases)
+            sample.indel_nucleotides[pos_] = bases
+        
+        elif promoterDel.fullmatch(mut):
+            gene, pos, bases = promoterDel.fullmatch(mut).groups()
+            sample = copy.deepcopy(reference)
+            pos = int(pos)
+            print(gene, pos, "del", bases)
+
+            if reference.genes[gene]['reverse_complement']:
+                #Revcomp genes' promoters will be past the `gene end`
+                geneEnd = reference.genes[gene]['end']
+                bases = ''.join(gumpy.Gene._complement(bases)[::-1])
+                #Pos is a little more involved here
+                #Should be adjusted by the length of the bases too
+                pos_ = geneEnd - pos - 1 - len(bases)
+            else:
+                geneStart = reference.genes[gene]['start']
+                pos_ = geneStart+pos
+
+            sample.is_indel[pos_] = True
+            sample.indel_length[pos_] = -len(bases)
+            sample.indel_nucleotides[pos_] = bases
+        
+        else:
+            #No matches so skip it
+            continue
             
-            #The only mutations between ref and sample are this SNP
-            #So pull out all available mutations (ignoring the original gene)
-            mutations = []
-            #Get genes at this position
-            possible = [reference.stacked_gene_name[i][pos_] for i in range(len(reference.stacked_gene_name)) if reference.stacked_gene_name[i][pos_] != '']
-            for g in possible:
-                if g == gene:
-                    continue
-                if row['PREDICTION'] == "R" and g not in previousGenes:
-                    newGenes.add((g, row['DRUG']))
-                diff = reference.build_gene(g) - sample.build_gene(g)
-                m = diff.mutations
-                if m:
-                    for mut_ in m:
-                        mutations.append(g+"@"+mut_)
-            
-            #Make them neat catalouge rows to add
-            for m in mutations:
-                for col in catalogue:
-                    if col == "MUTATION":
-                        toAdd[col].append(m)
-                    else:
-                        toAdd[col].append(row[col])
+        #The only mutations between ref and sample are the promoter mutation introduced above
+        #So pull out all available mutations (ignoring the original gene)
+        mutations = []
+        #Get genes at this position
+        possible = [reference.stacked_gene_name[i][pos_] for i in range(len(reference.stacked_gene_name)) if reference.stacked_gene_name[i][pos_] != '']
+        for g in possible:
+            if g == gene:
+                continue
+            if row['PREDICTION'] == "R" and g not in previousGenes:
+                newGenes.add((g, row['DRUG']))
+            print("Checking ", g)
+            diff = reference.build_gene(g) - sample.build_gene(g)
+            m = diff.mutations
+            if m:
+                for mut_ in m:
+                    mutations.append(g+"@"+mut_)
+        print()
+        
+        #Make them neat catalouge rows to add
+        for m in mutations:
+            for col in catalogue:
+                if col == "MUTATION":
+                    toAdd[col].append(m)
+                else:
+                    toAdd[col].append(row[col])
+
     for gene, drug in newGenes:
         #These are new resistance genes, so add default rules as appropriate
         defaults = [
@@ -364,12 +421,15 @@ if __name__ == "__main__":
     other = parseOther(other, reference)
 
     #Set of (gene, drug)
+    resistances = set()
     resistanceGenes = set()
     for mutation, drug in resistant.keys():
-        resistanceGenes.add((mutation.split("@")[0], drug))
+        resistances.add((mutation.split("@")[0], drug))
+        resistanceGenes.add(mutation.split("@")[0])
     for mutation, drug in other.keys():
         if other[(mutation, drug)] == 'R':
-            resistanceGenes.add((mutation.split("@")[0], drug))
+            resistances.add((mutation.split("@")[0], drug))
+            resistanceGenes.add(mutation.split("@")[0])
 
     today = date.today()
     with open(f"tbdb-{today}.GARC.csv", "w") as f:
@@ -382,11 +442,11 @@ if __name__ == "__main__":
 
         #Add the others
         for mutation, drug in other.keys():
-            if (mutation, drug) not in resistant.keys():
+            if (mutation, drug) not in resistant.keys() and mutation.split("@")[0] in resistanceGenes:
                 f.write(common+drug+","+mutation+","+other[(mutation, drug)]+",{},{},{}\n")
         
         #Add default rules for resistance genes
-        for gene, drug in resistanceGenes:
+        for gene, drug in resistances:
             f.write(common + drug + "," + gene + "@*?,U,{},{},{}\n")
             f.write(common + drug + "," + gene + "@-*?,U,{},{},{}\n")
             f.write(common + drug + "," + gene + "@*_indel,U,{},{},{}\n")

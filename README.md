@@ -1,6 +1,8 @@
 # TBProfiler-to-GARC
 Covert the TBProfiler's TBDB to GARC for use with `piezo`. Some default rules for resistance genes are added for completeness.
 
+Due to the nature of this catalogue, it is highly specific, and as such is significantly larger than other GARC catalogues.
+
 
 ## Assumptions
 Within the `tbdb.other_annotations.csv` there are some rows which appear to use an undocumented format for `iHGVS`. These rows contain several mutations, separated by the `|` character (which is reserved within `iHGVS` for denoting DNA methylation).
