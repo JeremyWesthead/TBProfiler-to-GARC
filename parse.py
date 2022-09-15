@@ -1,5 +1,6 @@
 '''Parse the TBProfiler DB to GARC for use with `piezo`
 '''
+import copy
 import re
 import pickle
 from datetime import date
@@ -248,6 +249,105 @@ def nucleotideVariants(gene: str, mutation: str) -> str:
 
     assert False, f"Nothing found for: {gene} @ {mutation}"        
 
+def addExtras(reference: gumpy.Genome) -> None:
+    '''(Adapted from the code written to parse WHO cat to GARC)
+    Once the catalogue has been parsed correctly, there will be some mutations which also lie within other genes
+    This finds them and adds them to the catalogue. Specifically, this checks for promoter SNPs which could be attributed
+    to other genes, especially in cases where the promoter position is beyond the arbitrary internal limits of gumpy.
+    Args:
+        reference (gumpy.Genome): Reference genome
+    '''
+    today = date.today()
+    catalogue = pd.read_csv(f"tbdb-{today}.GARC.csv")
+    toAdd = {column: [] for column in catalogue}
+    
+    #Track the new resistance genes this introduces to add default rules
+    newGenes = set()
+    previousGenes = set([mutation.split("@")[0] for mutation in catalogue['MUTATION']])
+    for _, row in catalogue.iterrows():
+        mut = row['MUTATION']
+        #Check for promoter
+        if "-" not in mut:
+            continue
+        #Check for default rules/multi for skipping
+        if "*" in mut or "?" in mut or "&" in mut or "indel" in mut:
+            continue
+        promoter = re.compile(r"""
+                            ([a-zA-Z0-9_]+)@ #Leading gene name
+                            ([a-z])(-[0-9]+)([a-z])
+                            """, re.VERBOSE)
+        if promoter.fullmatch(mut):
+            gene, ref, pos, alt = promoter.fullmatch(mut).groups()
+            pos = int(pos)
+            sample = copy.deepcopy(reference)
+            print(gene, pos, ref, alt)
+            
+            #Place the mutation within the genome based on the gene coordinates
+            #Then regardless of what gene it started in, we can pull out others
+            if reference.genes[gene]['reverse_complement']:
+                #Revcomp genes' promoters will be past the `gene end`
+                geneEnd = reference.genes[gene]['end']
+                ref_ = ''.join(gumpy.Gene._complement(ref))
+                alt_ = ''.join(gumpy.Gene._complement(alt))
+                pos_ = geneEnd-pos-1
+                assert reference.nucleotide_sequence[reference.nucleotide_index == geneEnd-pos-1] == ref_, "Ref does not match the genome..."
+                sample.nucleotide_sequence[reference.nucleotide_index == geneEnd-pos-1] = alt_
+            else:
+                geneStart = reference.genes[gene]['start']
+                pos_ = geneStart+pos
+                assert reference.nucleotide_sequence[reference.nucleotide_index == geneStart+pos] == ref, "Ref does not match the genome..."
+                sample.nucleotide_sequence[reference.nucleotide_index == geneStart+pos] = alt
+            
+            #The only mutations between ref and sample are this SNP
+            #So pull out all available mutations (ignoring the original gene)
+            mutations = []
+            #Get genes at this position
+            possible = [reference.stacked_gene_name[i][pos_] for i in range(len(reference.stacked_gene_name)) if reference.stacked_gene_name[i][pos_] != '']
+            for g in possible:
+                if g == gene:
+                    continue
+                if row['PREDICTION'] == "R" and g not in previousGenes:
+                    newGenes.add((g, row['DRUG']))
+                diff = reference.build_gene(g) - sample.build_gene(g)
+                m = diff.mutations
+                if m:
+                    for mut_ in m:
+                        mutations.append(g+"@"+mut_)
+            
+            #Make them neat catalouge rows to add
+            for m in mutations:
+                for col in catalogue:
+                    if col == "MUTATION":
+                        toAdd[col].append(m)
+                    else:
+                        toAdd[col].append(row[col])
+    for gene, drug in newGenes:
+        #These are new resistance genes, so add default rules as appropriate
+        defaults = [
+            (gene+"@*?", 'U'), (gene+"@-*?", 'U'),
+            (gene+"@*_indel", "U"), (gene+"@-*_indel", 'U')
+            ]
+        if reference.genes[gene]['codes_protein']:
+            defaults.append((gene+"@*=","S"))
+        for g, predict in defaults:
+            for col in catalogue:
+                if col == "MUTATION":
+                    toAdd[col].append(g)
+                elif col == "DRUG":
+                    toAdd[col].append(drug)
+                elif col == "PREDICTION":
+                    toAdd[col].append(predict)
+                elif col in ["SOURCE", "EVIDENCE", "OTHER"]:
+                    toAdd[col].append("{}")
+                else:
+                    #Others should be constant
+                    toAdd[col].append(toAdd[col][-1])
+    #Convert toAdd to dataframe and concat with catalogue
+    toAdd = pd.DataFrame(toAdd)
+    catalogue = pd.concat([catalogue, toAdd])
+    catalogue.to_csv(f"tbdb-{today}.GARC.csv", index=False)
+    
+
 if __name__ == "__main__":
     resistant = pd.read_csv("tbdb/tbdb.csv")
     other = pd.read_csv("tbdb/tbdb.other_annotations.csv")
@@ -263,6 +363,14 @@ if __name__ == "__main__":
 
     other = parseOther(other, reference)
 
+    #Set of (gene, drug)
+    resistanceGenes = set()
+    for mutation, drug in resistant.keys():
+        resistanceGenes.add((mutation.split("@")[0], drug))
+    for mutation, drug in other.keys():
+        if other[(mutation, drug)] == 'R':
+            resistanceGenes.add((mutation.split("@")[0], drug))
+
     today = date.today()
     with open(f"tbdb-{today}.GARC.csv", "w") as f:
         f.write("GENBANK_REFERENCE,CATALOGUE_NAME,CATALOGUE_VERSION,CATALOGUE_GRAMMAR,PREDICTION_VALUES,DRUG,MUTATION,PREDICTION,SOURCE,EVIDENCE,OTHER\n")
@@ -275,5 +383,17 @@ if __name__ == "__main__":
         #Add the others
         for mutation, drug in other.keys():
             if (mutation, drug) not in resistant.keys():
-                f.write(common+drug+","+mutation+","+other[(mutation, drug)]+",{},{},{}\n")   
+                f.write(common+drug+","+mutation+","+other[(mutation, drug)]+",{},{},{}\n")
+        
+        #Add default rules for resistance genes
+        for gene, drug in resistanceGenes:
+            f.write(common + drug + "," + gene + "@*?,U,{},{},{}\n")
+            f.write(common + drug + "," + gene + "@-*?,U,{},{},{}\n")
+            f.write(common + drug + "," + gene + "@*_indel,U,{},{},{}\n")
+            f.write(common + drug + "," + gene + "@-*_indel,U,{},{},{}\n")
+            if reference.genes[gene]['codes_protein']:
+                f.write(common + drug + "," + gene + "@*=,S,{},{},{}\n")
+    
+    #Add the alternate forms of some mutations which would otherwise be missed by gumpy
+    addExtras(reference)
         
