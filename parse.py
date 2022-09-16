@@ -360,7 +360,7 @@ def addExtras(reference: gumpy.Genome) -> None:
         for g in possible:
             if g == gene:
                 continue
-            if row['PREDICTION'] == "R" and g not in previousGenes:
+            if g not in previousGenes:
                 newGenes.add((g, row['DRUG']))
             print("Checking ", g)
             diff = reference.build_gene(g) - sample.build_gene(g)
@@ -399,9 +399,23 @@ def addExtras(reference: gumpy.Genome) -> None:
                 else:
                     #Others should be constant
                     toAdd[col].append(toAdd[col][-1])
+
     #Convert toAdd to dataframe and concat with catalogue
-    toAdd = pd.DataFrame(toAdd)
+    toAdd = pd.DataFrame(toAdd)    
     catalogue = pd.concat([catalogue, toAdd])
+
+    #Do some filtering to ensure that only resistance conferring genes are in the catalogue
+    #We only want mutations within genes which confer resistance for each drug
+    resistances = set([(mutation.split("@")[0], drug) for mutation, drug, prediction in catalogue[['MUTATION', 'DRUG', 'PREDICTION']].values.tolist() if prediction == "R"])
+    toDelete = []
+    for i, row in catalogue.iterrows():
+        gene = row['MUTATION'].split("@")[0]
+        if (gene, row['DRUG']) not in resistances:
+            print("Deleting ", row['MUTATION'], row['DRUG'])
+            toDelete.append(i)
+    
+    catalogue.drop(toDelete, inplace=True)
+
     catalogue.to_csv(f"tbdb-{today}.GARC.csv", index=False)
     
 
@@ -422,16 +436,14 @@ if __name__ == "__main__":
 
     #Set of (gene, drug)
     resistances = set()
-    resistanceGenes = set()
     for mutation, drug in resistant.keys():
         resistances.add((mutation.split("@")[0], drug))
-        resistanceGenes.add(mutation.split("@")[0])
     for mutation, drug in other.keys():
         if other[(mutation, drug)] == 'R':
             resistances.add((mutation.split("@")[0], drug))
-            resistanceGenes.add(mutation.split("@")[0])
 
     today = date.today()
+    seen = set()
     with open(f"tbdb-{today}.GARC.csv", "w") as f:
         f.write("GENBANK_REFERENCE,CATALOGUE_NAME,CATALOGUE_VERSION,CATALOGUE_GRAMMAR,PREDICTION_VALUES,DRUG,MUTATION,PREDICTION,SOURCE,EVIDENCE,OTHER\n")
         common = f"NC_000962.3,tbdb-{today},1.0,GARC1,RUS,"
@@ -439,11 +451,13 @@ if __name__ == "__main__":
         #All of these are R
         for mutation, drug in resistant.keys():
             f.write(common+drug+","+mutation+",R,{},{},{}\n")
+            seen.add((mutation, drug))
 
         #Add the others
         for mutation, drug in other.keys():
-            if (mutation, drug) not in resistant.keys() and mutation.split("@")[0] in resistanceGenes:
+            if (mutation, drug) not in seen and (mutation.split("@")[0], drug) in resistances:
                 f.write(common+drug+","+mutation+","+other[(mutation, drug)]+",{},{},{}\n")
+                seen.add((mutation, drug))
         
         #Add default rules for resistance genes
         for gene, drug in resistances:
